@@ -1,4 +1,3 @@
-import fs from 'node:fs'
 import { useCallback, useState } from 'react'
 import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
@@ -15,21 +14,45 @@ const loggedServerFunction = createServerFn({ method: "GET" }).middleware([
 ]);
 */
 
-const TODOS_FILE = 'todos.json'
+// 数据库文件路径
+const DB_FILE = 'todos.db'
+
+// 封装数据库操作的函数，仅在服务器端执行
+async function withDatabase<T>(fn: (db: any) => T): Promise<T> {
+  // 动态导入，仅在服务器端执行
+  const Database = (await import('better-sqlite3')).default
+  const db = new Database(DB_FILE)
+  
+  try {
+    // 初始化数据库表
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS todos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL
+      )
+    `)
+    
+    // 检查是否已有数据
+    const count = (db.prepare('SELECT COUNT(*) as count FROM todos').get() as { count: number }).count
+    
+    // 如果没有数据，插入一些示例数据
+    if (count === 0) {
+      const stmt = db.prepare('INSERT INTO todos (name) VALUES (?)')
+      stmt.run('Get groceries')
+      stmt.run('Buy a new phone')
+    }
+    
+    return fn(db)
+  } finally {
+    // 确保数据库连接关闭
+    db.close()
+  }
+}
 
 async function readTodos() {
-  return JSON.parse(
-    await fs.promises.readFile(TODOS_FILE, 'utf-8').catch(() =>
-      JSON.stringify(
-        [
-          { id: 1, name: 'Get groceries' },
-          { id: 2, name: 'Buy a new phone' },
-        ],
-        null,
-        2,
-      ),
-    ),
-  )
+  return withDatabase((db) => {
+    return db.prepare('SELECT * FROM todos ORDER BY id').all()
+  })
 }
 
 const getTodos = createServerFn({
@@ -39,10 +62,12 @@ const getTodos = createServerFn({
 const addTodo = createServerFn({ method: 'POST' })
   .inputValidator((d: string) => d)
   .handler(async ({ data }) => {
-    const todos = await readTodos()
-    todos.push({ id: todos.length + 1, name: data })
-    await fs.promises.writeFile(TODOS_FILE, JSON.stringify(todos, null, 2))
-    return todos
+    return withDatabase((db) => {
+      // 插入新的todo
+      db.prepare('INSERT INTO todos (name) VALUES (?)').run(data)
+      // 返回所有todos
+      return db.prepare('SELECT * FROM todos ORDER BY id').all()
+    })
   })
 
 export const Route = createFileRoute('/demo/start/server-funcs')({
